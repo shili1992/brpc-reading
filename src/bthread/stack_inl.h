@@ -49,12 +49,14 @@ struct LargeStackClass {
 template <typename StackClass> struct StackFactory {
     struct Wrapper : public ContextualStack {
         explicit Wrapper(void (*entry)(intptr_t)) {
+            // 分配存储空间
             if (allocate_stack_storage(&storage, *StackClass::stack_size_flag,
                                        FLAGS_guard_page_size) != 0) {
                 storage.zeroize();
                 context = NULL;
                 return;
             }
+            // 构造栈内部结构 第一个参数是bthread栈底指针，第二个是bthread栈大小，第三个是bthread的入口函数地址。
             context = bthread_make_fcontext(storage.bottom, storage.stacksize, entry);
             stacktype = (StackType)StackClass::stacktype;
         }
@@ -93,9 +95,10 @@ template <> struct StackFactory<MainStackClass> {
     }
 };
 
+// 最终调用bthread_make_fcontext的汇编实现的函数的参数，该函数真正构造一个从taskrunner开始执行的stack
 inline ContextualStack* get_stack(StackType type, void (*entry)(intptr_t)) {
     switch (type) {
-    case STACK_TYPE_PTHREAD:
+    case STACK_TYPE_PTHREAD:  // pthread  获取到的栈为空指针，这里会赋值为 _main_stack
         return NULL;
     case STACK_TYPE_SMALL:
         return StackFactory<SmallStackClass>::get_stack(entry);

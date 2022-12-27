@@ -70,6 +70,8 @@ inline TaskControl* get_task_control() {
     return g_task_control;
 }
 
+// 如果有说明其他地方已经建立过bthread了，也就已经启动了一定数量的taskgroup，如果没有说明是首次启动bthread，需要创建，
+// new taskcontrol后会执行taskcontrol的init，核心就是用pthread启动指定数量的worker
 inline TaskControl* get_or_new_task_control() {
     butil::atomic<TaskControl*>* p = (butil::atomic<TaskControl*>*)&g_task_control;
     TaskControl* c = p->load(butil::memory_order_consume);
@@ -141,6 +143,7 @@ start_from_non_worker(bthread_t* __restrict tid,
         }
         return g->start_background<true>(tid, attr, fn, arg);
     }
+    // 随机找一个 taskgroup, 并加入到 remote_q中
     return c->choose_one_group()->start_background<true>(
         tid, attr, fn, arg);
 }
@@ -169,6 +172,8 @@ struct TidJoiner {
 
 extern "C" {
 
+// 创建一个bthread，直接调用sched_to强行切换context到新的task
+// 让当前worker立即执行新bthread。
 int bthread_start_urgent(bthread_t* __restrict tid,
                          const bthread_attr_t* __restrict attr,
                          void * (*fn)(void*),
@@ -181,16 +186,17 @@ int bthread_start_urgent(bthread_t* __restrict tid,
     return bthread::start_from_non_worker(tid, attr, fn, arg);
 }
 
+// 插入到rq中，等待后续的按序调度。
 int bthread_start_background(bthread_t* __restrict tid,
                              const bthread_attr_t* __restrict attr,
                              void * (*fn)(void*),
                              void* __restrict arg) {
-    bthread::TaskGroup* g = bthread::tls_task_group;
+    bthread::TaskGroup* g = bthread::tls_task_group;  // pthread创建是 先从thread local中获取
     if (g) {
-        // start from worker
+        // start from worker, 插入task group中 rq中
         return g->start_background<false>(tid, attr, fn, arg);
     }
-    return bthread::start_from_non_worker(tid, attr, fn, arg);
+    return bthread::start_from_non_worker(tid, attr, fn, arg);  // pthread 中创建插入到 一个随机taskgroup的remote_q中
 }
 
 void bthread_flush() {
@@ -366,6 +372,7 @@ int bthread_usleep(uint64_t microseconds) {
     return ::usleep(microseconds);
 }
 
+// bthread执行过程中调用bthread_yield让出当前的worker
 int bthread_yield(void) {
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (NULL != g && !g->is_current_pthread_task()) {

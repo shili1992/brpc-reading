@@ -77,7 +77,7 @@ struct TaskMeta {
     void* arg;
 
     // Stack of this task.
-    ContextualStack* stack;
+    ContextualStack* stack;  // 任务的堆栈上下文
 
     // Attributes creating this task
     bthread_attr_t attr;

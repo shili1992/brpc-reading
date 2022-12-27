@@ -64,13 +64,14 @@ public:
     // Start the timer thread.
     // This method should only be called once.
     // return 0 if success, errno otherwise.
-    int start(const TimerThreadOptions* options);
+    int start(const TimerThreadOptions* options);   // 启动 TimerThread 线程
 
     // Stop the timer thread. Later schedule() will return INVALID_TASK_ID.
-    void stop_and_join();
+    void stop_and_join();  // 结束 TimerThread 线程
 
     // Schedule |fn(arg)| to run at realtime |abstime| approximately.
     // Returns: identifier of the scheduled task, INVALID_TASK_ID on error.
+    // 增加一个定时器任务
     TaskId schedule(void (*fn)(void*), void* arg, const timespec& abstime);
 
     // Prevent the task denoted by `task_id' from running. `task_id' must be
@@ -79,6 +80,7 @@ public:
     //   0   -  Removed the task which does not run yet
     //  -1   -  The task does not exist.
     //   1   -  The task is just running.
+    // 取消一个定时器任务
     int unschedule(TaskId task_id);
 
     // Get identifier of internal pthread.
@@ -87,7 +89,7 @@ public:
     
 private:
     // the timer thread will run this method.
-    void run();
+    void run();   // TimerThread 线程函数
     static void* run_this(void* arg);
 
     bool _started;            // whether the timer thread was started successfully.

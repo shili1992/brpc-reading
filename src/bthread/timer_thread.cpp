@@ -190,7 +190,7 @@ TimerThread::Bucket::schedule(void (*fn)(void*), void* arg,
         return result;
     }
     task->next = NULL;
-    task->fn = fn;
+    task->fn = fn;   // task要执行的函数
     task->arg = arg;
     task->run_time = butil::timespec_to_microseconds(abstime);
     uint32_t version = task->version.load(butil::memory_order_relaxed);
@@ -203,6 +203,7 @@ TimerThread::Bucket::schedule(void (*fn)(void*), void* arg,
     bool earlier = false;
     {
         BAIDU_SCOPED_LOCK(_mutex);
+        // 将task加入到链表中
         task->next = _task_head;
         _task_head = task;
         if (task->run_time < _nearest_run_time) {
@@ -224,6 +225,7 @@ TimerThread::TaskId TimerThread::schedule(
     const Bucket::ScheduleResult result = 
         _buckets[butil::fmix64(pthread_numeric_id()) % _options.num_buckets]
         .schedule(fn, arg, abstime);
+    // 如果有更早的唤醒时间
     if (result.earlier) {
         bool earlier = false;
         const int64_t run_time = butil::timespec_to_microseconds(abstime);
@@ -236,6 +238,7 @@ TimerThread::TaskId TimerThread::schedule(
             }
         }
         if (earlier) {
+            // 使用 futex 唤醒
             futex_wake_private(&_nsignals, 1);
         }
     }
@@ -277,7 +280,7 @@ bool TimerThread::Task::run_and_delete() {
     // This CAS is rarely contended, should be fast.
     if (version.compare_exchange_strong(
             expected_version, id_version + 1, butil::memory_order_relaxed)) {
-        fn(arg);
+        fn(arg);  // 执行函数
         // The release fence is paired with acquire fence in
         // TimerThread::unschedule to make changes of fn(arg) visible.
         version.store(id_version + 2, butil::memory_order_release);
@@ -320,6 +323,7 @@ void TimerThread::run() {
     BT_VLOG << "Started TimerThread=" << pthread_self();
 
     // min heap of tasks (ordered by run_time)
+    // TimerThread 线程内通过最小堆维护定时任务序列
     std::vector<Task*> tasks;
     tasks.reserve(4096);
 
@@ -348,7 +352,7 @@ void TimerThread::run() {
             _nearest_run_time = std::numeric_limits<int64_t>::max();
         }
         
-        // Pull tasks from buckets.
+        // Pull tasks from buckets. // 从所有的 Bucket 的获取任务
         for (size_t i = 0; i < _options.num_buckets; ++i) {
             Bucket& bucket = _buckets[i];
             for (Task* p = bucket.consume_tasks(); p != nullptr; ++nscheduled) {
@@ -356,7 +360,9 @@ void TimerThread::run() {
                 // in case of the deletion of Task p which is unscheduled
                 Task* next_task = p->next;
 
+                // 对于已经取消的任务，不会加入到堆里，直接删除。这也是高性能的关键
                 if (!p->try_delete()) { // remove the task if it's unscheduled
+                    // 循环加入到堆里
                     tasks.push_back(p);
                     std::push_heap(tasks.begin(), tasks.end(), task_greater);
                 }
@@ -364,9 +370,11 @@ void TimerThread::run() {
             }
         }
 
+        // 从最小堆中取出任务
         bool pull_again = false;
         while (!tasks.empty()) {
             Task* task1 = tasks[0];  // the about-to-run task
+            // 判断是否到时间了，没有则退出. 将所有到时间的task 执行
             if (butil::gettimeofday_us() < task1->run_time) {  // not ready yet.
                 break;
             }
@@ -390,10 +398,11 @@ void TimerThread::run() {
             }
             std::pop_heap(tasks.begin(), tasks.end(), task_greater);
             tasks.pop_back();
+            // 执行定时任务并删除
             if (task1->run_and_delete()) {
                 ++ntriggered;
             }
-        }
+        } // end while
         if (pull_again) {
             BT_VLOG << "pull again, tasks=" << tasks.size();
             continue;
@@ -428,6 +437,7 @@ void TimerThread::run() {
             ptimeout = &next_timeout;
         }
         busy_seconds += (now - last_sleep_time) / 1000000.0;
+        // 计算需要等待的时间，通过 futex 等待
         futex_wait_private(&_nsignals, expected_nsignals, ptimeout);
         last_sleep_time = butil::gettimeofday_us();
     }

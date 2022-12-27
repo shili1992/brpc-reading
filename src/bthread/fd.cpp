@@ -196,6 +196,7 @@ public:
         return 0;
     }
 
+    // 用于等待fd就绪
     int fd_wait(int fd, unsigned events, const timespec* abstime) {
         butil::atomic<EpollButex*>* p = fd_butexes.get_or_new(fd);
         if (NULL == p) {

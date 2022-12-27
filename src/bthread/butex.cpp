@@ -84,18 +84,19 @@ struct Butex;
 
 struct ButexWaiter : public butil::LinkNode<ButexWaiter> {
     // tids of pthreads are 0
-    bthread_t tid;
+    bthread_t tid;  // 用于区分是pthread 还是bthread， pthread 为0
 
     // Erasing node from middle of LinkedList is thread-unsafe, we need
     // to hold its container's lock.
-    butil::atomic<Butex*> container;
+    butil::atomic<Butex*> container; // container是用来保存butex的指针的
 };
 
 // non_pthread_task allocates this structure on stack and queue it in
 // Butex::waiters.
+//用于阻塞后唤醒的waiter
 struct ButexBthreadWaiter : public ButexWaiter {
     TaskMeta* task_meta;
-    TimerThread::TaskId sleep_id;
+    TimerThread::TaskId sleep_id;  // bthread usleep 的 task id
     WaiterState waiter_state;
     int expected_value;
     Butex* initial_butex;
@@ -105,8 +106,9 @@ struct ButexBthreadWaiter : public ButexWaiter {
 
 // pthread_task or main_task allocates this structure on stack and queue it
 // in Butex::waiters.
+// 用于阻塞后唤醒的waiter
 struct ButexPthreadWaiter : public ButexWaiter {
-    butil::atomic<int> sig;
+    butil::atomic<int> sig; // pthread futex使用的 int变量
 };
 
 typedef butil::LinkedList<ButexWaiter> ButexWaiterList;
@@ -117,9 +119,9 @@ struct BAIDU_CACHELINE_ALIGNMENT Butex {
     Butex() {}
     ~Butex() {}
 
-    butil::atomic<int> value;
-    ButexWaiterList waiters;
-    internal::FastPthreadMutex waiter_lock;
+    butil::atomic<int> value;  // futex wait所用到的u32的val的角色， 这个原子变量即表述了是否有竞争的存在
+    ButexWaiterList waiters;  //  保存在这个butex上挂起的bthread或者pthread
+    internal::FastPthreadMutex waiter_lock;  // waiter_lock则是操作队列用到的互斥锁
 };
 
 BAIDU_CASSERT(offsetof(Butex, value) == 0, offsetof_value_must_0);
@@ -169,14 +171,15 @@ int wait_pthread(ButexPthreadWaiter& pw, timespec* ptimeout) {
 extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group;
 extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group_nosignal;
 
+// 结束usleeop
 // Returns 0 when no need to unschedule or successfully unscheduled,
 // -1 otherwise.
 inline int unsleep_if_necessary(ButexBthreadWaiter* w,
                                 TimerThread* timer_thread) {
-    if (!w->sleep_id) {
+    if (!w->sleep_id) {  // 没有usleeep的 task
         return 0;
     }
-    if (timer_thread->unschedule(w->sleep_id) > 0) {
+    if (timer_thread->unschedule(w->sleep_id) > 0) { // 取消该task
         // the callback is running.
         return -1;
     }
@@ -240,7 +243,7 @@ inline int unsleep_if_necessary(ButexBthreadWaiter* w,
 // that butex_wake() may wake up an unrelated butex(the one reuses the memory)
 // and cause spurious wakeups. According to our observations, the race is 
 // infrequent, even rare. The extra spurious wakeups should be acceptable.
-
+// 这里的实现很简单，即创建一个Butex对象（从对象池获取，在一个申请好的block上构造对象）
 void* butex_create() {
     Butex* b = butil::get_object<Butex>();
     if (b) {
@@ -249,6 +252,7 @@ void* butex_create() {
     return NULL;
 }
 
+// butex释放，和create对应，需要归还会object_pool中（不释放内存，仅仅是标记这一块内存可以被其他对象使用了）
 void butex_destroy(void* butex) {
     if (!butex) {
         return;
@@ -285,19 +289,25 @@ int butex_wake(void* arg, bool nosignal) {
     ButexWaiter* front = NULL;
     {
         BAIDU_SCOPED_LOCK(b->waiter_lock);
-        if (b->waiters.empty()) {
+        if (b->waiters.empty()) { // 如果没有等待的thread，则无需进行wake，直接返回
             return 0;
         }
+        // 取出waiter队列中的第一个thread，从waiter链表中摘除
         front = b->waiters.head()->value();
         front->RemoveFromList();
         front->container.store(NULL, butil::memory_order_relaxed);
     }
+    // 检查bthread_id，如果=0则说明是pthread模式，直接去wake pthread，这里调用了futex_wake
     if (front->tid == 0) {
         wakeup_pthread(static_cast<ButexPthreadWaiter*>(front));
         return 1;
     }
     ButexBthreadWaiter* bbw = static_cast<ButexBthreadWaiter*>(front);
-    unsleep_if_necessary(bbw, get_global_timer_thread());
+    unsleep_if_necessary(bbw, get_global_timer_thread());  // 结束该bthead 的sleep
+
+    // 这里通过对tls_task_group（安全性检查）的判断，来检验当前pthread是不是一个可以执行唤醒后的bthread的worker
+    // 如果是，则将该bthread直接在本group执行
+    // 如果不是，则随机选一个task_group加到其remote队列中
     TaskGroup* g = get_task_group(bbw->control, nosignal);
     if (g == tls_task_group) {
         run_in_local_task_group(g, bbw->tid, nosignal);
@@ -467,6 +477,7 @@ int butex_requeue(void* arg, void* arg2) {
     return 1;
 }
 
+
 // Callable from multiple threads, at most one thread may wake up the waiter.
 static void erase_from_butex_and_wakeup(void* arg) {
     erase_from_butex(static_cast<ButexWaiter*>(arg), true, WAITER_STATE_TIMEDOUT);
@@ -484,6 +495,7 @@ inline bool erase_from_butex(ButexWaiter* bw, bool wakeup, WaiterState state) {
     bool erased = false;
     Butex* b;
     int saved_errno = errno;
+    // 从container中删除
     while ((b = bw->container.load(butil::memory_order_acquire))) {
         // b can be NULL when the waiter is scheduled but queued.
         BAIDU_SCOPED_LOCK(b->waiter_lock);
@@ -497,7 +509,7 @@ inline bool erase_from_butex(ButexWaiter* bw, bool wakeup, WaiterState state) {
             break;
         }
     }
-    if (erased && wakeup) {
+    if (erased && wakeup) { // 将该bthread 重新加入到 group 队列中执行
         if (bw->tid) {
             ButexBthreadWaiter* bbw = static_cast<ButexBthreadWaiter*>(bw);
             get_task_group(bbw->control)->ready_to_run_general(bw->tid);
@@ -510,6 +522,7 @@ inline bool erase_from_butex(ButexWaiter* bw, bool wakeup, WaiterState state) {
     return erased;
 }
 
+// 将bthreadwaiter加入到  waiter队列中， 并且添加定时任务(时间到了，重新将bthreahd加入到group队列中)
 static void wait_for_butex(void* arg) {
     ButexBthreadWaiter* const bw = static_cast<ButexBthreadWaiter*>(arg);
     Butex* const b = bw->initial_butex;
@@ -529,13 +542,16 @@ static void wait_for_butex(void* arg) {
     // value.
     {
         BAIDU_SCOPED_LOCK(b->waiter_lock);
+//        在真正放进队列之前再check一次value是否发生了变化，如果发生了变化，直接unsleep并且调度原来的bthread
         if (b->value.load(butil::memory_order_relaxed) != bw->expected_value) {
             bw->waiter_state = WAITER_STATE_UNMATCHEDVALUE;
         } else if (bw->waiter_state == WAITER_STATE_READY/*1*/ &&
                    !bw->task_meta->interrupted) {
+            //append到waiter队列
             b->waiters.Append(bw);
             bw->container.store(b, butil::memory_order_relaxed);
             if (bw->abstime != NULL) {
+                // 添加定时任务， 到了将 将该bthread 重新加入到 group 队列中执行，b从 waiter和container中删除
                 bw->sleep_id = get_global_timer_thread()->schedule(
                     erase_from_butex_and_wakeup, bw, *bw->abstime);
                 if (!bw->sleep_id) {  // TimerThread stopped.
@@ -593,7 +609,7 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
         task->current_waiter.store(&pw, butil::memory_order_release);
     }
     b->waiter_lock.lock();
-    if (b->value.load(butil::memory_order_relaxed) != expected_value) {
+    if (b->value.load(butil::memory_order_relaxed) != expected_value) {  // 如果和期待值不一致， 则立即返回
         b->waiter_lock.unlock();
         errno = EWOULDBLOCK;
         rc = -1;
@@ -604,7 +620,7 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
         errno = EINTR;
         rc = -1;
     } else {
-        b->waiters.Append(&pw);
+        b->waiters.Append(&pw);  // 加入到pthread队列中
         pw.container.store(b, butil::memory_order_relaxed);
         b->waiter_lock.unlock();
 
@@ -612,7 +628,7 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
         bvar::Adder<int64_t>& num_waiters = butex_waiter_count();
         num_waiters << 1;
 #endif
-        rc = wait_pthread(pw, ptimeout);
+        rc = wait_pthread(pw, ptimeout);   // futex wait
 #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
         num_waiters << -1;
 #endif
@@ -636,6 +652,7 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
 
 int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+    // 首先也是判断值是否匹配，如果不匹配就直接返回不阻塞，
     if (b->value.load(butil::memory_order_relaxed) != expected_value) {
         errno = EWOULDBLOCK;
         // Sometimes we may take actions immediately after unmatched butex,
@@ -644,9 +661,12 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
         return -1;
     }
     TaskGroup* g = tls_task_group;
+    // 同样通过对tls_task_group的检查来区分bthread和pthread执行
+    // is_current_pthread_task=true 表示这是一个pthread，butex_wait_from_pthread最后还是通过futex_wait来使其等待
     if (NULL == g || g->is_current_pthread_task()) {
         return butex_wait_from_pthread(g, b, expected_value, abstime);
     }
+    // 创建bthread 的waiter并进行相关变量的赋值，包括超时时间的设定
     ButexBthreadWaiter bbw;
     // tid is 0 iff the thread is non-bthread
     bbw.tid = g->current_tid();
@@ -677,9 +697,11 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     // release fence matches with acquire fence in interrupt_and_consume_waiters
     // in task_group.cpp to guarantee visibility of `interrupted'.
     bbw.task_meta->current_waiter.store(&bbw, butil::memory_order_release);
+    // 将bthreadwaiter加入到  waiter队列中， 并且添加定时任务(时间到了，重新将bthreahd加入到group队列中)
     g->set_remained(wait_for_butex, &bbw);
-    TaskGroup::sched(&g);
+    TaskGroup::sched(&g); // 把当前bthread挂到队列里并让出worker
 
+    //  wait完毕之后恢复运行的地方， 在这里执行
     // erase_from_butex_and_wakeup (called by TimerThread) is possibly still
     // running and using bbw. The chance is small, just spin until it's done.
     BT_LOOP_WHEN(unsleep_if_necessary(&bbw, get_global_timer_thread()) < 0,

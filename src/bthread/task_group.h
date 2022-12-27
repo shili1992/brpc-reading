@@ -51,6 +51,7 @@ private:
 // Notice that most methods involving context switching are static otherwise
 // pointer `this' may change after wakeup. The **pg parameters in following
 // function are updated before returning.
+// 一个taskgroup对应一个worker
 class TaskGroup {
 public:
     // Create task `fn(arg)' with attributes `attr' in TaskGroup *pg and put
@@ -85,6 +86,7 @@ public:
     static void sched_to(TaskGroup** pg, bthread_t next_tid);
     static void exchange(TaskGroup** pg, bthread_t next_tid);
 
+    // 这个回调函数将在下个 bthread 中运行
     // The callback will be run in the beginning of next-run bthread.
     // Can't be called by current bthread directly because it often needs
     // the target to be suspended already.
@@ -211,12 +213,16 @@ friend class TaskControl;
     // loop calling this function should end.
     bool wait_task(bthread_t* tid);
 
+    // 先获取当前TG的remote_rq，然后是依次窃取其他TG的rq、remote_rq
     bool steal_task(bthread_t* tid) {
         if (_remote_rq.pop(tid)) {
             return true;
         }
 #ifndef BTHREAD_DONT_SAVE_PARKING_STATE
-        _last_pl_state = _pl->get_state();
+        // _last_pl_state 的状态在这里进行更新
+        // _last_pl_state 发生变化时 wait_task 中的 wait 会直接跳过
+        // 这里容忍 false postive，增加的开销是多一次尝试 steal_task
+        _last_pl_state = _pl->get_state(); // 保存pl状态，则会根据上一次的steal_task里保存的状态来判断 是否休眠
 #endif
         return _control->steal_task(tid, &_steal_seed, _steal_offset);
     }
@@ -225,7 +231,7 @@ friend class TaskControl;
     int _sched_recursive_guard;
 #endif
 
-    TaskMeta* _cur_meta;
+    TaskMeta* _cur_meta;    //当前group 即将运行的task
     
     // the control that this group belongs to
     TaskControl* _control;
@@ -245,10 +251,10 @@ friend class TaskControl;
 #endif
     size_t _steal_seed;
     size_t _steal_offset;
-    ContextualStack* _main_stack;
-    bthread_t _main_tid;
-    WorkStealingQueue<bthread_t> _rq;
-    RemoteTaskQueue _remote_rq;
+    ContextualStack* _main_stack;  //用于做偷取线程时使用到的堆栈
+    bthread_t _main_tid;  //  调度线程
+    WorkStealingQueue<bthread_t> _rq; // 每个pthread中，bthread自己内部使用的任务队列，MPSC，wait-free
+    RemoteTaskQueue _remote_rq;  // 从外部插入的任务，比如使用bthread_start函数等，mutex protected
     int _remote_num_nosignal;
     int _remote_nsignaled;
 };

@@ -37,6 +37,7 @@ inline uint32_t get_version(bthread_t tid) {
     return (uint32_t)((tid >> 32) & 0xFFFFFFFFul);
 }
 
+// 根据 bthread id获取  对应的task meta
 inline TaskMeta* TaskGroup::address_meta(bthread_t tid) {
     // TaskMeta * m = address_resource<TaskMeta>(get_slot(tid));
     // if (m != NULL && m->version == get_version(tid)) {
@@ -61,8 +62,9 @@ inline void TaskGroup::exchange(TaskGroup** pg, bthread_t next_tid) {
 
 inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
     TaskMeta* next_meta = address_meta(next_tid);
-    if (next_meta->stack == NULL) {
-        ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner);
+    if (next_meta->stack == NULL) { //根据传入的next_tid取出对应bthread的meta信息, 如果对应meta的stack为空，说明这是一个新建的bthread，
+        //get_stack  最终调用bthread_make_fcontext的汇编实现的函数的参数，该函数真正构造一个从taskrunner开始执行的stack
+        ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner); // 第二个task_runner则是真正的用户函数的入口函数
         if (stk) {
             next_meta->set_stack(stk);
         } else {
@@ -70,6 +72,7 @@ inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
             // In latter case, attr is forced to be BTHREAD_STACKTYPE_PTHREAD.
             // This basically means that if we can't allocate stack, run
             // the task in pthread directly.
+            // pthread  获取到的栈为空指针，这里会赋值为 _main_stack
             next_meta->attr.stack_type = BTHREAD_STACKTYPE_PTHREAD;
             next_meta->set_stack((*pg)->_main_stack);
         }

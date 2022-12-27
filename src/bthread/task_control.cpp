@@ -55,6 +55,7 @@ void run_worker_startfn() {
     }
 }
 
+// 创建 pthread 的run function
 void* TaskControl::worker_thread(void* arg) {
     run_worker_startfn();    
 #ifdef BAIDU_INTERNAL
@@ -62,7 +63,7 @@ void* TaskControl::worker_thread(void* arg) {
 #endif
     
     TaskControl* c = static_cast<TaskControl*>(arg);
-    TaskGroup* g = c->create_group();
+    TaskGroup* g = c->create_group();  // 每个pthread 创建一个
     TaskStatistics stat;
     if (NULL == g) {
         LOG(ERROR) << "Fail to create TaskGroup in pthread=" << pthread_self();
@@ -73,7 +74,7 @@ void* TaskControl::worker_thread(void* arg) {
 
     tls_task_group = g;
     c->_nworkers << 1;
-    g->run_main_task();
+    g->run_main_task(); // worker的工作入口
 
     stat = g->main_stat();
     BT_VLOG << "Destroying worker=" << pthread_self() << " bthread="
@@ -143,6 +144,7 @@ TaskControl::TaskControl()
     CHECK(_groups) << "Fail to create array of groups";
 }
 
+// pthread启动指定数量的worker
 int TaskControl::init(int concurrency) {
     if (_concurrency != 0) {
         LOG(ERROR) << "Already initialized";
@@ -210,6 +212,7 @@ int TaskControl::add_workers(int num) {
     return _concurrency.load(butil::memory_order_relaxed) - old_concurency;
 }
 
+// 随机找一个 taskgroup
 TaskGroup* TaskControl::choose_one_group() {
     const size_t ngroup = _ngroup.load(butil::memory_order_acquire);
     if (ngroup != 0) {
@@ -332,6 +335,7 @@ int TaskControl::_destroy_group(TaskGroup* g) {
     return 0;
 }
 
+//  随机从其他group steal task, 规则从各个woker里取，优先本地队列，后remote队列。
 bool TaskControl::steal_task(bthread_t* tid, size_t* seed, size_t offset) {
     // 1: Acquiring fence is paired with releasing fence in _add_group to
     // avoid accessing uninitialized slot of _groups.

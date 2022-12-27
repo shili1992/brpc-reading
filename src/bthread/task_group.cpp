@@ -121,7 +121,11 @@ bool TaskGroup::wait_task(bthread_t* tid) {
         if (_last_pl_state.stopped()) {
             return false;
         }
-        _pl->wait(_last_pl_state);
+         // state和last_state一致的时候就直接wait了，否则会尝试去steal，
+         // 在循环里，根据futex的机制，如果上一个state和当前_pl上的state一致，那么说明_pl上的任务没变化，继续steal没有意义，则wait
+         // 如果进入了wait，在_pl的signal被调用的时候也会被唤醒
+        _pl->wait(_last_pl_state);  //如果_last_pl_state没有变化， 则没有新的任务进来 则休眠
+        // 有其他地方调用_pl上的signal, 也就是有新的任务加到某个队列里，_pending_signal也会发生变化，steal有可能成功, 则开始steal
         if (steal_task(tid)) {
             return true;
         }
@@ -149,10 +153,13 @@ void TaskGroup::run_main_task() {
 
     TaskGroup* dummy = this;
     bthread_t tid;
-    while (wait_task(&tid)) {
-        TaskGroup::sched_to(&dummy, tid);
+    // 每个pthread有入口run_main_task，有自己的上下文环境，当前pthread空闲或者刚启动就会从其他的pthread偷取bthread执行。
+    //一直循环取task然后执行，有可能wait在某个parking lot上等待其他的唤醒。
+    while (wait_task(&tid)) {  // 不断循环等待可以执行的bthread
+        // 整个函数内容是一个死循环，也就是我们常说的spinlock，因为futex机制的特性，通常都是结合spinlock来使用，
+        TaskGroup::sched_to(&dummy, tid);  // 立即让出当前worker, 执行 steal 到的task
         DCHECK_EQ(this, dummy);
-        DCHECK_EQ(_cur_meta->stack, _main_stack);
+        DCHECK_EQ(_cur_meta->stack, _main_stack);  // 其他bthread 切换会 main bthread stack
         if (_cur_meta->tid != _main_tid) {
             TaskGroup::task_runner(1/*skip remained*/);
         }
@@ -256,7 +263,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
     //       different groups.
     TaskGroup* g = tls_task_group;
 
-    if (!skip_remained) {
+    if (!skip_remained) {  // 以前的 bthead切换到 新创建的bthread之后执行  之前bthread 的callback
         while (g->_last_context_remained) {
             RemainedFn fn = g->_last_context_remained;
             g->_last_context_remained = NULL;
@@ -452,9 +459,9 @@ int TaskGroup::start_background(bthread_t* __restrict th,
     }
     _control->_nbthreads << 1;
     if (REMOTE) {
-        ready_to_run_remote(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL));
+        ready_to_run_remote(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL)); // 插入到remote queue中
     } else {
-        ready_to_run(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL));
+        ready_to_run(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL)); // 插入到rq中
     }
     return 0;
 }
@@ -513,6 +520,8 @@ TaskStatistics TaskGroup::main_stat() const {
     return m ? m->stat : EMPTY_STAT;
 }
 
+// 在ending_sched()中，会有依次从TG的rq、remote_rq取任务，
+// 找不到再窃取其他TG的任务， 则设置_cur_meta为_main_tid，也就是让task_runner()的循环终止。
 void TaskGroup::ending_sched(TaskGroup** pg) {
     TaskGroup* g = *pg;
     bthread_t next_tid = 0;
@@ -521,13 +530,13 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
     // When BTHREAD_FAIR_WSQ is defined, profiling shows that cpu cost of
     // WSQ::steal() in example/multi_threaded_echo_c++ changes from 1.9%
     // to 2.9%
-    const bool popped = g->_rq.pop(&next_tid);
+    const bool popped = g->_rq.pop(&next_tid);  // 优先重 rq 中获取
 #else
     const bool popped = g->_rq.steal(&next_tid);
 #endif
-    if (!popped && !g->steal_task(&next_tid)) {
+    if (!popped && !g->steal_task(&next_tid)) {    // 先获取当前TG的remote_rq，然后是依次窃取其他TG的rq、remote_rq
         // Jump to main task if there's no task to run.
-        next_tid = g->_main_tid;
+        next_tid = g->_main_tid;  // 如果再找不到 则 切换到 main_tid中
     }
 
     TaskMeta* const cur_meta = g->_cur_meta;
@@ -554,6 +563,7 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
     sched_to(pg, next_meta);
 }
 
+// 有依次从TG的rq、remote_rq取任务， 并sched调度到下一个bthread
 void TaskGroup::sched(TaskGroup** pg) {
     TaskGroup* g = *pg;
     bthread_t next_tid = 0;
@@ -563,7 +573,7 @@ void TaskGroup::sched(TaskGroup** pg) {
 #else
     const bool popped = g->_rq.steal(&next_tid);
 #endif
-    if (!popped && !g->steal_task(&next_tid)) {
+    if (!popped && !g->steal_task(&next_tid)) {   // 先获取当前TG的remote_rq，然后是依次窃取其他TG的rq、remote_rq
         // Jump to main task if there's no task to run.
         next_tid = g->_main_tid;
     }
@@ -573,6 +583,7 @@ void TaskGroup::sched(TaskGroup** pg) {
 #if defined(__linux__) && defined(__aarch64__) && defined(__clang__)
     __attribute__((optnone))
 #endif
+// 让出当前tg直接调度指定tg
 void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
     TaskGroup* g = *pg;
 #ifndef NDEBUG
@@ -597,9 +608,9 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
     ++ g->_nswitch;
     // Switch to the task
     if (__builtin_expect(next_meta != cur_meta, 1)) {
-        g->_cur_meta = next_meta;
+        g->_cur_meta = next_meta;   // 设置当前group 即将运行的task
         // Switch tls_bls
-        cur_meta->local_storage = tls_bls;
+        cur_meta->local_storage = tls_bls;  // 切换local storage
         tls_bls = next_meta->local_storage;
 
         // Logging must be done after switching the local storage, since the logging lib
@@ -613,8 +624,9 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
         if (cur_meta->stack != NULL) {
             if (next_meta->stack != cur_meta->stack) {
                 jump_stack(cur_meta->stack, next_meta->stack);
+                //  这一步开始 切换到其他bthread 中运行
                 // probably went to another group, need to assign g again.
-                g = tls_task_group;
+                g = tls_task_group;  // 切换到对应的 taskgropup
             }
 #ifndef NDEBUG
             else {
@@ -629,10 +641,10 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
         LOG(FATAL) << "bthread=" << g->current_tid() << " sched_to itself!";
     }
 
-    while (g->_last_context_remained) {
+    while (g->_last_context_remained) {  // 执行 上一个bthread 设置的 回调函数，这个是在切换后的 bthread 中执行
         RemainedFn fn = g->_last_context_remained;
         g->_last_context_remained = NULL;
-        fn(g->_last_context_remained_arg);
+        fn(g->_last_context_remained_arg);  //执行callback
         g = tls_task_group;
     }
 
@@ -655,6 +667,7 @@ void TaskGroup::destroy_self() {
     }
 }
 
+// 将任务插入到rq中
 void TaskGroup::ready_to_run(bthread_t tid, bool nosignal) {
     push_rq(tid);
     if (nosignal) {
@@ -663,7 +676,7 @@ void TaskGroup::ready_to_run(bthread_t tid, bool nosignal) {
         const int additional_signal = _num_nosignal;
         _num_nosignal = 0;
         _nsignaled += 1 + additional_signal;
-        _control->signal_task(1 + additional_signal);
+        _control->signal_task(1 + additional_signal);  //唤醒 线程来执行
     }
 }
 
@@ -716,6 +729,7 @@ void TaskGroup::ready_to_run_general(bthread_t tid, bool nosignal) {
     return ready_to_run_remote(tid, nosignal);
 }
 
+// 将还没有触发信号的任务统一触发信号（工作线程内调用）
 void TaskGroup::flush_nosignal_tasks_general() {
     if (tls_task_group == this) {
         return flush_nosignal_tasks();
@@ -723,6 +737,7 @@ void TaskGroup::flush_nosignal_tasks_general() {
     return flush_nosignal_tasks_remote();
 }
 
+// 将任务插入到rq中
 void TaskGroup::ready_to_run_in_worker(void* args_in) {
     ReadyToRunArgs* args = static_cast<ReadyToRunArgs*>(args_in);
     return tls_task_group->ready_to_run(args->tid, args->nosignal);
@@ -740,9 +755,11 @@ struct SleepArgs {
     TaskGroup* group;
 };
 
+// 随机向一个task group中添加任务
 static void ready_to_run_from_timer_thread(void* arg) {
     CHECK(tls_task_group == NULL);
     const SleepArgs* e = static_cast<const SleepArgs*>(arg);
+    // 到时间后，根据 tid 将任务重新加入队列
     e->group->control()->choose_one_group()->ready_to_run_remote(e->tid);
 }
 
@@ -754,6 +771,8 @@ void TaskGroup::_add_sleep_event(void* void_args) {
     TaskGroup* g = e.group;
 
     TimerThread::TaskId sleep_id;
+    // timer 在时间到的时候会执行 ready_to_run_from_timer_thread（改usleep之前的bthread随机向一个task group中添加）
+    // 这样之前的bthread 就可以 被重新调度了
     sleep_id = get_global_timer_thread()->schedule(
         ready_to_run_from_timer_thread, void_args,
         butil::microseconds_from_now(e.timeout_us));
@@ -797,9 +816,10 @@ int TaskGroup::usleep(TaskGroup** pg, uint64_t timeout_us) {
     TaskGroup* g = *pg;
     // We have to schedule timer after we switched to next bthread otherwise
     // the timer may wake up(jump to) current still-running context.
+    // 将定时任务打包为 remained 函数. 将当前 bthread tid 封装成参数，
     SleepArgs e = { timeout_us, g->current_tid(), g->current_task(), g };
     g->set_remained(_add_sleep_event, &e);
-    sched(pg);
+    sched(pg);   // 当前协程出让
     g = *pg;
     e.meta->current_sleep = 0;
     if (e.meta->interrupted) {
@@ -896,8 +916,9 @@ int TaskGroup::interrupt(bthread_t tid, TaskControl* c) {
 void TaskGroup::yield(TaskGroup** pg) {
     TaskGroup* g = *pg;
     ReadyToRunArgs args = { g->current_tid(), false };
-    g->set_remained(ready_to_run_in_worker, &args);
-    sched(pg);
+    // 用set_ramained把 ready_to_run_in_worker和当前bthread注册到下个bhtread启动前的回调里。
+    g->set_remained(ready_to_run_in_worker, &args);  // 这个回调是 将 bthread 加入到任务队列中
+    sched(pg); // sched调度下一个bthread
 }
 
 void print_task(std::ostream& os, bthread_t tid) {

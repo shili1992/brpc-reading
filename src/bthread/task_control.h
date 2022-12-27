@@ -92,12 +92,12 @@ private:
     bvar::LatencyRecorder* create_exposed_pending_time();
 
     butil::atomic<size_t> _ngroup;
-    TaskGroup** _groups;
+    TaskGroup** _groups;  // TaskGroup对象指针的数组
     butil::Mutex _modify_group_mutex;
 
     bool _stop;
     butil::atomic<int> _concurrency;
-    std::vector<pthread_t> _workers;
+    std::vector<pthread_t> _workers; // pthread线程标识符的数组，表示创建了多少个pthread worker线程，每个pthread worker线程应拥有一个线程私有的TaskGroup对象
 
     bvar::Adder<int64_t> _nworkers;
     butil::Mutex _pending_time_mutex;
@@ -112,7 +112,7 @@ private:
     bvar::Adder<int64_t> _nbthreads;
 
     static const int PARKING_LOT_NUM = 4;
-    ParkingLot _pl[PARKING_LOT_NUM];
+    ParkingLot _pl[PARKING_LOT_NUM]; // ParkingLot类型的数组。ParkingLot对象用于bthread任务的等待-通知，管理多个task_group，避免惊群
 };
 
 inline bvar::LatencyRecorder& TaskControl::exposed_pending_time() {

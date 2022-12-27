@@ -43,13 +43,16 @@ public:
     ParkingLot() : _pending_signal(0) {}
 
     // Wake up at most `num_task' workers.
-    // Returns #workers woken up.
+    // Returns #workers woken up.   唤醒num_task个等待在_pending_signal上的线程
     int signal(int num_task) {
+        // 在调用之前对_pending_signal执行了原子加，加的是num_task << 1，
+        // 之所以要左移是因为第一位是用于表明是否停止的标识位。启动一个bthread就会调用一次signal(1)。
         _pending_signal.fetch_add((num_task << 1), butil::memory_order_release);
         return futex_wake_private(&_pending_signal, num_task);
     }
 
     // Get a state for later wait().
+    // get_state是获取用于wait的状态，就是直接返回_pending_signal的值，返回类型是State
     State get_state() {
         return _pending_signal.load(butil::memory_order_acquire);
     }
@@ -67,7 +70,7 @@ public:
     }
 private:
     // higher 31 bits for signalling, LSB for stopping.
-    butil::atomic<int> _pending_signal;
+    butil::atomic<int> _pending_signal;  // wait和signal的futex变量, ，留了最低位作为一个是否停止的标识， 只会递增
 };
 
 }  // namespace bthread
