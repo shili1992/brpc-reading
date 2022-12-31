@@ -527,6 +527,7 @@ void Socket::ReleaseAllFailedWriteRequests(Socket::WriteRequest* req) {
     ReturnFailedWriteRequest(req, error_code, error_text);
 }
 
+// 这里进行了fd 注册了事件
 int Socket::ResetFileDescriptor(int fd) {
     // Reset message sizes when fd is changed.
     _last_msg_size = 0;
@@ -580,7 +581,7 @@ int Socket::ResetFileDescriptor(int fd) {
     }
 
     if (_on_edge_triggered_events) {
-        if (GetGlobalEventDispatcher(fd).AddConsumer(id(), fd) != 0) {
+        if (GetGlobalEventDispatcher(fd).AddConsumer(id(), fd) != 0) {  // 这里进行了fd 注册了事件
             PLOG(ERROR) << "Fail to add SocketId=" << id() 
                         << " into EventDispatcher";
             _fd.store(-1, butil::memory_order_release);
@@ -593,6 +594,7 @@ int Socket::ResetFileDescriptor(int fd) {
 // SocketId = 32-bit version + 32-bit slot.
 //   version: from version part of _versioned_nref, must be an EVEN number.
 //   slot: designated by ResourcePool.
+// 这里进行了fd 注册了事件
 int Socket::Create(const SocketOptions& options, SocketId* id) {
     butil::ResourceId<Socket> slot;
     Socket* const m = butil::get_resource(&slot, Forbidden());
@@ -679,7 +681,7 @@ int Socket::Create(const SocketOptions& options, SocketId* id) {
     CHECK(NULL == m->_write_head.load(butil::memory_order_relaxed));
     // Must be last one! Internal fields of this Socket may be access
     // just after calling ResetFileDescriptor.
-    if (m->ResetFileDescriptor(options.fd) != 0) {
+    if (m->ResetFileDescriptor(options.fd) != 0) {   // 这里进行了fd 注册了事件
         const int saved_errno = errno;
         PLOG(ERROR) << "Fail to ResetFileDescriptor";
         m->SetFailed(saved_errno, "Fail to ResetFileDescriptor: %s", 
@@ -1090,6 +1092,8 @@ void Socket::OnRecycle() {
 void* Socket::ProcessEvent(void* arg) {
     // the enclosed Socket is valid and free to access inside this function.
     SocketUniquePtr s(static_cast<Socket*>(arg));
+    // 新连接要调用的回调函数 OnNewConnections
+    // 数据过来的回调函数， InputMessenger::OnNewMessages
     s->_on_edge_triggered_events(s.get());
     return NULL;
 }
@@ -1102,6 +1106,7 @@ void* Socket::ProcessEvent(void* arg) {
 // `old_head' is last new_head got from this function or (in another word)
 // tail of current writing list.
 // `singular_node' is true iff `old_head' is the only node in its list.
+// Iswritecomplete用于判断是否写完，当前request没写完和有新来的request都算没写完
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
                              bool singular_node,
                              Socket::WriteRequest** new_tail) {
@@ -1306,6 +1311,7 @@ int Socket::CheckConnected(int sockfd) {
     return SSLHandshake(sockfd, false);
 }
 
+// 如果没连接，则进行连接操作并注册epollout
 int Socket::ConnectIfNot(const timespec* abstime, WriteRequest* req) {
     if (_fd.load(butil::memory_order_consume) >= 0) {
        return 0;
@@ -1316,6 +1322,7 @@ int Socket::ConnectIfNot(const timespec* abstime, WriteRequest* req) {
     ReAddress(&s);
     req->socket = s.get();
     if (_conn) {
+//        Connect的时候会用KeepWriteIfConnected作为回调函数注册epoll out事件
         if (_conn->Connect(this, abstime, KeepWriteIfConnected, req) < 0) {
             return -1;
         }
@@ -1640,7 +1647,7 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
 #else
         {
 #endif
-            nw = req->data.cut_into_file_descriptor(fd());
+            nw = req->data.cut_into_file_descriptor(fd());  // 往fd中 写入数据
         }
     }
     if (nw < 0) {
@@ -1656,12 +1663,15 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     } else {
         AddOutputBytes(nw);
     }
+    // 如果写完了结束
+    // Iswritecomplete用于判断是否写完，当前request没写完和有新来的request都算没写完
     if (IsWriteComplete(req, true, NULL)) {
         ReturnSuccessfulWriteRequest(req);
         return 0;
     }
 
 KEEPWRITE_IN_BACKGROUND:
+//    就地写没写完，拿当前req作为参数启动bt执行keepwrite继续写，
     ReAddress(&ptr_for_keep_write);
     req->socket = ptr_for_keep_write.release();
     if (bthread_start_background(&th, &BTHREAD_ATTR_NORMAL,
@@ -1691,6 +1701,7 @@ void* Socket::KeepWrite(void* void_arg) {
     // returning directly otherwise _write_head is permantly non-NULL which
     // makes later Write() abnormal.
     WriteRequest* cur_tail = NULL;
+    // 整个keepwrtie在一个do whilie(1)结构体里，也就是没写完就不断地一直写，顺序就是先写完当前req的，再写翻转过的链表的下一个req，保证顺序
     do {
         // req was written, skip it.
         if (req->next != NULL && req->data.empty()) {
@@ -2043,10 +2054,13 @@ AuthContext* Socket::mutable_auth_context() {
     return _auth_context;
 }
 
+// 服务器启动后会由EventDispatcher监听epoll事件，作为服务器，收到一个新连接属于epoll_in事件，
+// 会调用Socket::StartInputEvent进行处理
+// 这个函数就是启动一个bthread 处理 可以读取的数据
 int Socket::StartInputEvent(SocketId id, uint32_t events,
                             const bthread_attr_t& thread_attr) {
     SocketUniquePtr s;
-    if (Address(id, &s) < 0) {
+    if (Address(id, &s) < 0) {  // 根据SocketId获取socket s
         return -1;
     }
     if (NULL == s->_on_edge_triggered_events) {
@@ -2081,7 +2095,8 @@ int Socket::StartInputEvent(SocketId id, uint32_t events,
 
         bthread_attr_t attr = thread_attr;
         attr.keytable_pool = p->_keytable_pool;
-        if (bthread_start_urgent(&tid, &attr, ProcessEvent, p) != 0) {
+        // EventDispatcher把所在的pthread让给了新建的bthread，使其有更好的cache locality，可以尽快地读取fd上的数据
+        if (bthread_start_urgent(&tid, &attr, ProcessEvent, p) != 0) { // 启动bthread会让出当前bthread
             LOG(FATAL) << "Fail to start ProcessEvent";
             ProcessEvent(p);
         }

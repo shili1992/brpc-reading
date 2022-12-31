@@ -27,7 +27,7 @@
 
 namespace brpc {
 
-DEFINE_int32(event_dispatcher_num, 1, "Number of event dispatcher");
+DEFINE_int32(event_dispatcher_num, 1, "Number of event dispatcher");  // dispacher 线程数量
 
 DEFINE_bool(usercode_in_pthread, false, 
             "Call user's callback in pthreads, use bthreads otherwise");
@@ -58,7 +58,7 @@ EventDispatcher& GetGlobalEventDispatcher(int fd) {
     if (FLAGS_event_dispatcher_num == 1) {
         return g_edisp[0];
     }
-    int index = butil::fmix32(fd) % FLAGS_event_dispatcher_num;
+    int index = butil::fmix32(fd) % FLAGS_event_dispatcher_num;  // MurmurHash3将fd均匀分配到各EventDispatcher
     return g_edisp[index];
 }
 

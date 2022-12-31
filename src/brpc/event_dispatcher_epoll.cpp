@@ -19,6 +19,7 @@
 #ifdef BRPC_SOCKET_HAS_EOF
 #include "brpc/details/has_epollrdhup.h"
 #endif
+#include "event_dispatcher.h"
 
 namespace brpc {
 
@@ -83,7 +84,7 @@ int EventDispatcher::Start(const bthread_attr_t* consumer_thread_attr) {
     // is also a potential issue for consumer threads, using the same attr
     // should be a reasonable solution.
     int rc = bthread_start_background(
-        &_tid, &epoll_thread_attr, RunThis, this);
+        &_tid, &epoll_thread_attr, RunThis, this);  // 启动bthread 运行loop
     if (rc) {
         LOG(FATAL) << "Fail to create epoll thread: " << berror(rc);
         return -1;
@@ -111,6 +112,8 @@ void EventDispatcher::Join() {
     }
 }
 
+// 添加监听epoll_out事件（可写事件），和添加epollin的方式类似，epoll_out事件，多了一个pollin参数，
+// 如果为true会同时监听epoll_in，事件来后直接调用的是Socket::HandleEpollOut
 int EventDispatcher::AddEpollOut(SocketId socket_id, int fd, bool pollin) {
     if (_epfd < 0) {
         errno = EINVAL;
@@ -154,6 +157,9 @@ int EventDispatcher::RemoveEpollOut(SocketId socket_id,
     return -1;
 }
 
+//在fd上添加epoll_in事件（可读事件）进行监听，参数socket_id会保存到添加的事件里
+// 边沿触发
+// 事件来后直接调用的是Socket:: StartInputEvent
 int EventDispatcher::AddConsumer(SocketId socket_id, int fd) {
     if (_epfd < 0) {
         errno = EINVAL;
@@ -202,7 +208,7 @@ void EventDispatcher::Run() {
             n = epoll_wait(_epfd, e, ARRAY_SIZE(e), -1);
         }
 #else
-        const int n = epoll_wait(_epfd, e, ARRAY_SIZE(e), -1);
+        const int n = epoll_wait(_epfd, e, ARRAY_SIZE(e), -1);  // -1 表示无线阻塞
 #endif
         if (_stop) {
             // epoll_ctl/epoll_wait should have some sort of memory fencing

@@ -434,7 +434,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
         }
         const Server::MethodProperty* mp =
             server_accessor.FindMethodPropertyByFullName(
-                svc_name, request_meta.method_name());
+                svc_name, request_meta.method_name());  // 找到用户reqeust对应的方法，
         if (NULL == mp) {
             cntl->SetFailed(ENOMETHOD, "Fail to find method=%s/%s",
                             request_meta.service_name().c_str(),
@@ -513,6 +513,7 @@ void ProcessRpcRequest(InputMessageBase* msg_base) {
                                    req.release(), res.release(), done);
         }
         if (BeginRunningUserCode()) {
+            // 调用用户定义代码，  具体的打包发送则是通过调用done->Run()
             svc->CallMethod(method, cntl.release(), 
                             req.release(), res.release(), done);
             return EndRunningUserCodeInPlace();

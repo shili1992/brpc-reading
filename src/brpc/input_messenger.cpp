@@ -61,6 +61,7 @@ const size_t MIN_ONCE_READ = 4096;
 const size_t MAX_ONCE_READ = 524288;
 const size_t PROTO_DUMMY_LEN = 4;
 
+// 一般是把消息从二进制流上切割下来 解析
 ParseResult InputMessenger::CutInputMessage(
         Socket* m, size_t* index, bool read_eof) {
     const int preferred = m->preferred_index();
@@ -71,6 +72,7 @@ ParseResult InputMessenger::CutInputMessage(
             && _handlers[preferred].parse != NULL) {
         int cur_index = preferred;
         do {
+            // Parse一般是把消息从二进制流上切割下来 解析
             ParseResult result =
                 _handlers[cur_index].parse(&m->_read_buf, m, read_eof, _handlers[cur_index].arg);
             if (result.is_ok() ||
@@ -156,7 +158,7 @@ ParseResult InputMessenger::CutInputMessage(
 
 void* ProcessInputMessage(void* void_arg) {
     InputMessageBase* msg = static_cast<InputMessageBase*>(void_arg);
-    msg->_process(msg);
+    msg->_process(msg); // Msg->_process是对应协议的process_request请求处理函数，其中最终会调用用户函数
     return NULL;
 }
 
@@ -166,6 +168,7 @@ struct RunLastMessage {
     }
 };
 
+// 启动一个bthread执行ProcessInputMessage来处理一个msg。
 static void QueueMessage(InputMessageBase* to_run_msg,
                          int* num_bthread_created,
                          bthread_keytable_pool_t* keytable_pool) {
@@ -181,6 +184,7 @@ static void QueueMessage(InputMessageBase* to_run_msg,
                           BTHREAD_ATTR_PTHREAD :
                           BTHREAD_ATTR_NORMAL) | BTHREAD_NOSIGNAL;
     tmp.keytable_pool = keytable_pool;
+    // 调用的是msg->_process，也就是对应协议的process_request来处理cut下来的message
     if (bthread_start_background(
             &th, &tmp, ProcessInputMessage, to_run_msg) == 0) {
         ++*num_bthread_created;
@@ -302,6 +306,7 @@ int InputMessenger::ProcessNewMessage(
             // Transfer ownership to last_msg
             last_msg.reset(msg.release());
         } else {
+            // 启动一个bthread执行ProcessInputMessage来处理一个msg
             QueueMessage(msg.release(), &num_bthread_created,
                                 m->_keytable_pool);
             bthread_flush();
@@ -314,6 +319,7 @@ int InputMessenger::ProcessNewMessage(
     return 0;
 }
 
+// 有数据可读的回调函数。
 void InputMessenger::OnNewMessages(Socket* m) {
     // Notes:
     // - If the socket has only one message, the message will be parsed and
@@ -333,7 +339,8 @@ void InputMessenger::OnNewMessages(Socket* m) {
     // OK in most cases.
     InputMessageClosure last_msg;
     bool read_eof = false;
-    while (!read_eof) {
+    // 负责从fd上切割和 处理消息
+    while (!read_eof) {  // 没读完就一直读
         const int64_t received_us = butil::cpuwide_time_us();
         const int64_t base_realtime = butil::gettimeofday_us() - received_us;
 
@@ -370,6 +377,7 @@ void InputMessenger::OnNewMessages(Socket* m) {
             }
         }
 
+        // 处理消息
         if (m->_rdma_state == Socket::RDMA_OFF && messenger->ProcessNewMessage(
                     m, nr, read_eof, received_us, base_realtime, last_msg) < 0) {
             return;

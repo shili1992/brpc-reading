@@ -1017,6 +1017,7 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     _current_call.need_feedback = false;
     _current_call.enable_circuit_breaker = has_enabled_circuit_breaker();
     SocketUniquePtr tmp_sock;
+    // 根据连接类型获取合适的socket
     if (SingleServer()) {
         // Don't use _current_call.peer_id which is set to -1 after construction
         // of the backup call.
@@ -1137,6 +1138,7 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     // Make request
     butil::IOBuf packet;
     SocketMessage* user_packet = NULL;
+    // 打包数据发送，首先调用对应的协议打包：
     _pack_request(&packet, &user_packet, cid.value, _method, this,
                   _request_buf, using_auth);
     // TODO: PackRequest may accept SocketMessagePtr<>?
@@ -1171,6 +1173,7 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     wopt.ignore_eovercrowded = has_flag(FLAGS_IGNORE_EOVERCROWDED);
     int rc;
     size_t packet_size = 0;
+    // 写入数据
     if (user_packet_guard) {
         if (span) {
             packet_size = user_packet_guard->EstimatedByteSize();

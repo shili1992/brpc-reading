@@ -189,7 +189,7 @@ struct SocketOptions {
     // or EAGAIN is met, otherwise the callback will not be called again
     // until new data arrives. The callback will not be called from more than
     // one thread at any time.
-    void (*on_edge_triggered_events)(Socket*);
+    void (*on_edge_triggered_events)(Socket*);  // epoll边缘触发事件到来后的处理函数
     int health_check_interval_s;
     std::shared_ptr<SocketSSLContext> initial_ssl_ctx;
     bool use_rdma;

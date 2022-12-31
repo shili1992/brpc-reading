@@ -81,7 +81,7 @@ int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
     SocketOptions options;
     options.fd = listened_fd;
     options.user = this;
-    options.on_edge_triggered_events = OnNewConnections;
+    options.on_edge_triggered_events = OnNewConnections;  // 回调函数
     if (Socket::Create(options, &_acception_id) != 0) {
         // Close-idle-socket thread will be stopped inside destructor
         LOG(FATAL) << "Fail to create _acception_id";

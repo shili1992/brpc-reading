@@ -587,6 +587,8 @@ Acceptor* Server::BuildAcceptor() {
         }
         // `process_request' is required at server side
         handler.parse = protocols[i].parse;
+        // handler.process都是protocols[i]里面的process_request，
+        // 也就是对应协议在服务端使用用来处理过接收到的请求的，对应的如果是客户端用的则是process_response
         handler.process = protocols[i].process_request;
         handler.verify = protocols[i].verify;
         handler.arg = this;

@@ -233,6 +233,7 @@ void ChannelBalancer::RemoveAndDestroyChannel(SelectiveChannel::ChannelHandle ha
     }
 }
 
+// 悬着一个server 进行发送
 inline int ChannelBalancer::SelectChannel(const LoadBalancer::SelectIn& in,
                                           SelectOut* out) {
     LoadBalancer::SelectOut sel_out(&out->fake_sock);
@@ -297,7 +298,7 @@ int Sender::IssueRPC(int64_t start_realtime_us) {
                                       _main_cntl->_accessed };
     ChannelBalancer::SelectOut sel_out;
     const int rc = static_cast<ChannelBalancer*>(_main_cntl->_lb.get())
-        ->SelectChannel(sel_in, &sel_out);
+        ->SelectChannel(sel_in, &sel_out);  // 选择一个server 进行发送
     if (rc != 0) {
         _main_cntl->SetFailed(rc, "Fail to select channel, %s", berror(rc));
         return -1;

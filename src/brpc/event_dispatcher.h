@@ -84,16 +84,16 @@ private:
     int RemoveConsumer(int fd);
 
     // The epoll to watch events.
-    int _epfd;
+    int _epfd;  // 监听事件的epfd
 
     // false unless Stop() is called.
     volatile bool _stop;
 
     // identifier of hosting bthread
-    bthread_t _tid;
+    bthread_t _tid;  // EventDispatcher当前所在的bthread的id
 
     // The attribute of bthreads calling user callbacks.
-    bthread_attr_t _consumer_thread_attr;
+    bthread_attr_t _consumer_thread_attr;  // epoll_in或者epoll_out事件到来后新建bthread执行用户回调函数所要用到的线程属性
 
     // Pipe fds to wakeup EventDispatcher from `epoll_wait' in order to quit
     int _wakeup_fds[2];

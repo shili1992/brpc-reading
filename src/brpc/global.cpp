@@ -390,6 +390,8 @@ static void GlobalInitializeOrDieImpl() {
         exit(1);
     }
 
+//    注册了包括http在内的各种各样的协议支持，简单来说就是指定了各协议的消息解析函数、
+//    server端用到的request处理函数、client端用到的response处理函数，比如request处理函数
     // Protocols
     Protocol baidu_protocol = { ParseRpcMessage,
                                 SerializeRequestDefault, PackRpcRequest,
